@@ -93,12 +93,13 @@ Press **i** to switch sources at any time. The Dock badge shows `SYS` or `MIC`.
 The menu bar has a **Source** menu that lists **All System Audio**, the
 **Microphone**, and every application that is currently producing sound
 (Spotify, Apple Music, a browser, …). Pick one to visualise just that app's
-output. This uses **Core Audio process taps** (macOS 14.4+) and needs **no
-Screen Recording permission** — but because macOS treats capturing any audio as
-microphone input, it does require **Microphone** access. Cthugha asks for it on
-first launch; if you declined, enable it under **System Settings → Privacy &
-Security → Microphone** and reselect the source. Selecting Spotify then works
-instantly and the app keeps playing normally while you watch. The menu refreshes
+output. This uses **Core Audio process taps** (macOS 14.4+), which on macOS 26
+require the **Screen & System Audio Recording** permission — the same grant the
+system-audio path uses (only the audio is captured, no screen frames). If it is
+off, the tap is created but only sees silence, so Cthugha shows a message
+pointing you at **System Settings → Privacy & Security → Screen & System Audio
+Recording**; enable Cthugha there and reselect the source. Selecting Spotify then
+works instantly and the app keeps playing normally while you watch. The menu refreshes
 each time you open it, so start playback first if an app isn't listed yet. The
 Dock badge shows a short tag for the selected app (e.g. `SPO`).
 

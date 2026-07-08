@@ -3,6 +3,7 @@ import AppKit
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import CoreGraphics
 
 // A running application that is currently producing audio, together with the
 // Core Audio process object IDs that belong to it (an app such as a browser can
@@ -22,7 +23,9 @@ struct AudioApp: Equatable {
 }
 
 // Helpers for enumerating audio processes and per-app capture via Core Audio
-// process taps (macOS 14.4+). No Screen Recording permission is required.
+// process taps (macOS 14.4+). Capturing another app's audio this way requires
+// the "Screen & System Audio Recording" permission (the same one
+// ScreenCaptureKit uses); without it the tap is created but delivers silence.
 enum ProcessAudio {
     static func addr(_ selector: AudioObjectPropertySelector,
                      _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
@@ -111,8 +114,8 @@ enum ProcessAudio {
             .map { $0.objectID }
     }
 
-    // Whether Cthugha already holds Microphone (audio-input) authorization, which
-    // macOS also requires to capture another app's audio via a process tap.
+    // Whether Cthugha already holds Microphone (audio-input) authorization, used
+    // by the microphone source and the mic fallback (not by process taps).
     static var isAudioInputAuthorized: Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
@@ -130,15 +133,17 @@ enum ProcessAudio {
     }
 }
 
-// Thrown when a per-app tap can't capture because Microphone access is off, so
-// the UI can point the user straight at the relevant System Settings pane.
+// Thrown when a per-app tap can't capture because "Screen & System Audio
+// Recording" access is off, so the UI can point the user straight at the
+// relevant System Settings pane.
 enum ProcessTapError: LocalizedError {
-    case microphoneDenied(String)
+    case screenRecordingDenied(String)
     var errorDescription: String? {
         switch self {
-        case .microphoneDenied(let app):
-            return "\(app) audio can't be captured without Microphone access. " +
-                   "Enable it in System Settings ▸ Privacy & Security ▸ Microphone, then reselect the source."
+        case .screenRecordingDenied(let app):
+            return "\(app) audio can't be captured without Screen & System Audio Recording access. " +
+                   "Enable it for Cthugha in System Settings ▸ Privacy & Security ▸ " +
+                   "Screen & System Audio Recording, then reselect the source."
         }
     }
 }
@@ -186,11 +191,16 @@ final class ProcessTapAudioSource: AudioSource {
         audioLock.lock(); lastAudioAt = CFAbsoluteTimeGetCurrent(); audioLock.unlock()
     }
 
-    // Ensure Microphone (audio-input) authorization before creating a tap; a tap
-    // built without it is created successfully but only ever delivers silence.
-    private static func ensureAudioInputAuthorized(for app: String) async throws {
-        if await ProcessAudio.requestAudioInputAccess() { return }
-        throw ProcessTapError.microphoneDenied(app)
+    // Ensure "Screen & System Audio Recording" authorization before creating a
+    // tap; on macOS 14.4+ a Core Audio process tap of another app's audio is
+    // created successfully but only ever delivers *silence* unless the app holds
+    // this permission (the same TCC grant ScreenCaptureKit uses). Microphone
+    // access is unrelated and is not sufficient.
+    private static func ensureScreenRecordingAuthorized(for app: String) throws {
+        if CGPreflightScreenCaptureAccess() { return }
+        // Surface the system prompt if the permission hasn't been decided yet.
+        if CGRequestScreenCaptureAccess() { return }
+        throw ProcessTapError.screenRecordingDenied(app)
     }
 
     func start() async throws {
@@ -205,11 +215,10 @@ final class ProcessTapAudioSource: AudioSource {
                           userInfo: [NSLocalizedDescriptionKey: "\(name) is not producing audio."])
         }
 
-        // macOS treats capturing another app's audio through a Core Audio process
-        // tap as audio input, so the tap silently delivers *zeros* unless we hold
-        // Microphone (audio-input) authorization. Request it before creating the
-        // tap so a fresh install actually reacts instead of showing calm visuals.
-        try await Self.ensureAudioInputAuthorized(for: name)
+        // A process tap of another app's audio delivers *zeros* unless Cthugha
+        // holds "Screen & System Audio Recording" access, so require it before
+        // creating the tap — otherwise the visuals just stay calm with no hint why.
+        try Self.ensureScreenRecordingAuthorized(for: name)
 
         markAudio()
 
@@ -233,10 +242,10 @@ final class ProcessTapAudioSource: AudioSource {
         var asbd = AudioStreamBasicDescription()
         var fmtAddr = ProcessAudio.addr(kAudioTapPropertyFormat)
         var fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        AudioObjectGetPropertyData(tap, &fmtAddr, 0, nil, &fmtSize, &asbd)
+        _ = AudioObjectGetPropertyData(tap, &fmtAddr, 0, nil, &fmtSize, &asbd)
         let channels = max(1, Int(asbd.mChannelsPerFrame))
 
-        // 3) Private aggregate device wrapping the tap.
+        // 3) Aggregate device wrapping the tap.
         let aggUID = UUID().uuidString
         let subTap: [String: Any] = [
             kAudioSubTapUIDKey as String: desc.uuid.uuidString,

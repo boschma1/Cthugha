@@ -144,9 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         systemSource = SystemAudioSource(store: store)
         micSource = MicAudioSource(store: store)
         AppDelegate.printHelp()
-        // Per-app taps and the mic fallback both need Microphone (audio-input)
-        // authorization, so ask for it up front rather than only when the mic
-        // source happens to run — otherwise a per-app tap silently sees zeros.
+        // The microphone source and the system-audio mic fallback need Microphone
+        // (audio-input) authorization, so ask for it up front. Per-app taps and the
+        // ScreenCaptureKit system-audio path instead need "Screen & System Audio
+        // Recording", whose prompt is surfaced by startSystemAudio() below.
         Task { await ProcessAudio.requestAudioInputAccess() }
         startSystemAudio()
         updateTitle()
@@ -281,8 +282,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 updateTitle()
                 startAppTapWatchdog(for: app.bundleID)
             } catch let error as ProcessTapError {
-                // e.g. Microphone access is off — tell the user how to fix it and
-                // fall back to system audio so there's still something on screen.
+                // e.g. Screen & System Audio Recording is off — tell the user how
+                // to fix it and fall back to system audio so there's still
+                // something on screen.
                 NSLog("Cthugha: \(newSource.name) capture blocked: \(error.localizedDescription)")
                 hud.showList(error.localizedDescription)
                 startSystemAudio()
