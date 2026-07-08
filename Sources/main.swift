@@ -305,6 +305,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         viewMenu.addItem(preset)
         startFullScreenItem = preset
 
+        // "Controls" menu — the complete keyboard-command list. Every item runs
+        // its action on click and shows the shortcut natively; the shortcuts also
+        // keep working directly (see CthughaView.keyDown).
+        let controlsItem = NSMenuItem()
+        mainMenu.addItem(controlsItem)
+        let ctl = NSMenu(title: "Controls")
+        controlsItem.submenu = ctl
+        let leftArrow = String(UnicodeScalar(NSLeftArrowFunctionKey)!)
+        let rightArrow = String(UnicodeScalar(NSRightArrowFunctionKey)!)
+        func ctlAdd(_ title: String, _ action: Selector, _ key: String,
+                    _ mods: NSEvent.ModifierFlags = []) {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            it.keyEquivalentModifierMask = mods
+            it.target = self
+            ctl.addItem(it)
+        }
+        ctlAdd("Next Motion Mode", #selector(ctlNextMode(_:)), "m")
+        ctlAdd("Previous Palette", #selector(ctlPrevPalette(_:)), leftArrow)
+        ctlAdd("Next Palette", #selector(ctlNextPalette(_:)), rightArrow)
+        ctlAdd("Toggle Colour Cycling", #selector(ctlToggleColorCycle(_:)), "c")
+        ctl.addItem(.separator())
+        ctlAdd("Next Style", #selector(ctlNextStyle(_:)), "v")
+        ctlAdd("Previous Style", #selector(ctlPrevStyle(_:)), "v", [.shift])
+        ctl.addItem(.separator())
+        ctlAdd("Wave Amplitude – More  ( + )", #selector(ctlAmpUp(_:)), "")
+        ctlAdd("Wave Amplitude – Less  ( - )", #selector(ctlAmpDown(_:)), "")
+        ctlAdd("Feedback Decay – Longer  ( . )", #selector(ctlDecayUp(_:)), "")
+        ctlAdd("Feedback Decay – Shorter  ( , )", #selector(ctlDecayDown(_:)), "")
+        ctlAdd("Intensity – More  ( ] )", #selector(ctlIntensityUp(_:)), "")
+        ctlAdd("Intensity – Less  ( [ )", #selector(ctlIntensityDown(_:)), "")
+        ctlAdd("Swirl – More  ( 0 )", #selector(ctlSwirlUp(_:)), "")
+        ctlAdd("Swirl – Less  ( 9 )", #selector(ctlSwirlDown(_:)), "")
+        ctl.addItem(.separator())
+        ctlAdd("Toggle Audio Source (System / Mic)", #selector(ctlToggleSource(_:)), "i")
+        let fsCtl = NSMenuItem(title: "Toggle Full Screen",
+                               action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fsCtl.keyEquivalentModifierMask = []
+        ctl.addItem(fsCtl)
+        ctlAdd("Print Controls to Console", #selector(ctlHelp(_:)), "h")
+
         // Dynamic "Source" menu — lists system audio, microphone, and every app
         // currently producing audio. Rebuilt each time it opens (menuNeedsUpdate).
         let sourceItem = NSMenuItem()
@@ -364,6 +404,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
         rebuildStyleMenu()
     }
+
+    // MARK: - Controls menu actions
+    // Each mirrors a key in CthughaView.keyDown. refreshStyleMenu() updates the
+    // window title and keeps the Style checkmark in sync (manual tweaks that call
+    // markCustom() drop back to "Current").
+    @objc private func ctlNextMode(_ s: Any?) { renderer.nextMode(); refreshStyleMenu() }
+    @objc private func ctlNextPalette(_ s: Any?) { renderer.nextPalette(); refreshStyleMenu() }
+    @objc private func ctlPrevPalette(_ s: Any?) { renderer.prevPalette(); refreshStyleMenu() }
+    @objc private func ctlToggleColorCycle(_ s: Any?) { renderer.toggleColorCycle(); refreshStyleMenu() }
+    @objc private func ctlNextStyle(_ s: Any?) { renderer.nextStyle(); refreshStyleMenu() }
+    @objc private func ctlPrevStyle(_ s: Any?) { renderer.prevStyle(); refreshStyleMenu() }
+    @objc private func ctlAmpUp(_ s: Any?) { renderer.changeWaveAmp(0.1); refreshStyleMenu() }
+    @objc private func ctlAmpDown(_ s: Any?) { renderer.changeWaveAmp(-0.1); refreshStyleMenu() }
+    @objc private func ctlDecayUp(_ s: Any?) { renderer.changeDecay(0.005); refreshStyleMenu() }
+    @objc private func ctlDecayDown(_ s: Any?) { renderer.changeDecay(-0.005); refreshStyleMenu() }
+    @objc private func ctlIntensityUp(_ s: Any?) { renderer.changeIntensity(0.1); refreshStyleMenu() }
+    @objc private func ctlIntensityDown(_ s: Any?) { renderer.changeIntensity(-0.1); refreshStyleMenu() }
+    @objc private func ctlSwirlUp(_ s: Any?) { renderer.changeSwirl(0.25); refreshStyleMenu() }
+    @objc private func ctlSwirlDown(_ s: Any?) { renderer.changeSwirl(-0.25); refreshStyleMenu() }
+    @objc private func ctlToggleSource(_ s: Any?) { toggleAudioSource(); updateTitle() }
+    @objc private func ctlHelp(_ s: Any?) { AppDelegate.printHelp() }
 
     private func rebuildSourceMenu() {
         guard let menu = sourceMenu else { return }

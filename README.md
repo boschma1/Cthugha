@@ -150,7 +150,9 @@ The icon is generated from `tools/MakeIcon.swift`. Regenerate it with:
 | `esc` | Leave full screen |
 | `h` | Print help to the console |
 
-The current mode/palette/source is shown in the window title.
+The current mode/palette/source is shown in the window title. Every command
+above is also available from the **Controls** menu in the menu bar (with its
+shortcut shown), so you can drive the visuals without memorising the keys.
 
 ## How it works
 
