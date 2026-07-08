@@ -9,17 +9,15 @@ final class CthughaView: MTKView {
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
-        guard let renderer else { return }
+        guard let ad = appDelegate else { return }
 
         // Arrow keys cycle the colour palette (left/down = previous, right/up = next).
         switch event.keyCode {
         case 123, 125: // left, down
-            renderer.prevPalette()
-            appDelegate?.updateTitle()
+            ad.performPrevPalette()
             return
         case 124, 126: // right, up
-            renderer.nextPalette()
-            appDelegate?.updateTitle()
+            ad.performNextPalette()
             return
         default:
             break
@@ -30,41 +28,39 @@ final class CthughaView: MTKView {
         case "f":
             window?.toggleFullScreen(nil)
         case " ", "m":
-            renderer.nextMode()
+            ad.performNextMode()
         case "p":
-            renderer.nextPalette()
+            ad.performNextPalette()
         case "c":
-            renderer.toggleColorCycle()
+            ad.performToggleColorCycle()
         case "i":
-            appDelegate?.toggleAudioSource()
+            ad.performToggleSource()
         case "v":
-            if event.modifierFlags.contains(.shift) { renderer.prevStyle() }
-            else { renderer.nextStyle() }
-            appDelegate?.refreshStyleMenu()
+            if event.modifierFlags.contains(.shift) { ad.performPrevStyle() }
+            else { ad.performNextStyle() }
         case "=", "+":
-            renderer.changeWaveAmp(0.1)
+            ad.performAmp(0.1)
         case "-", "_":
-            renderer.changeWaveAmp(-0.1)
+            ad.performAmp(-0.1)
         case ".", ">":
-            renderer.changeDecay(0.005)
+            ad.performDecay(0.005)
         case ",", "<":
-            renderer.changeDecay(-0.005)
+            ad.performDecay(-0.005)
         case "]":
-            renderer.changeIntensity(0.1)
+            ad.performIntensity(0.1)
         case "[":
-            renderer.changeIntensity(-0.1)
+            ad.performIntensity(-0.1)
         case ")", "0":
-            renderer.changeSwirl(0.25)
+            ad.performSwirl(0.25)
         case "(", "9":
-            renderer.changeSwirl(-0.25)
+            ad.performSwirl(-0.25)
         case "h":
-            AppDelegate.printHelp()
+            ad.showHelp()
         case "\u{1b}": // esc leaves full screen
             if window?.styleMask.contains(.fullScreen) == true { window?.toggleFullScreen(nil) }
         default:
             break
         }
-        appDelegate?.updateTitle()
     }
 }
 
@@ -72,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var window: NSWindow!
     private var rootView: RootView!
     private var overlay: NowPlayingOverlay!
+    private var hud: HUDOverlay!
     private var view: CthughaView!
     private var renderer: Renderer!
     private let store = WaveformStore()
@@ -120,11 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.delegate = renderer
 
         overlay = NowPlayingOverlay(frame: .zero)
+        hud = HUDOverlay(frame: .zero)
         rootView = RootView(frame: rect)
         rootView.metalView = view
         rootView.overlay = overlay
+        rootView.hud = hud
         rootView.addSubview(view)
         rootView.addSubview(overlay)
+        rootView.addSubview(hud)
 
         window.contentView = rootView
         window.makeFirstResponder(view)
@@ -343,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fsCtl.keyEquivalentModifierMask = []
         ctl.addItem(fsCtl)
-        ctlAdd("Print Controls to Console", #selector(ctlHelp(_:)), "h")
+        ctlAdd("Show Keyboard Shortcuts", #selector(ctlHelp(_:)), "h")
 
         // Dynamic "Source" menu — lists system audio, microphone, and every app
         // currently producing audio. Rebuilt each time it opens (menuNeedsUpdate).
@@ -400,31 +400,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func selectStyle(_ sender: NSMenuItem) {
         guard let i = sender.representedObject as? Int else { return }
-        renderer.setStyle(i)
+        performSetStyle(i)
+    }
+
+    // MARK: - Control actions (shared by the Controls menu and CthughaView.keyDown)
+    // Each performs the change, refreshes the title/Style checkmark (manual tweaks
+    // call markCustom() and drop back to "Current"), and flashes the on-screen HUD.
+    func performNextMode() { renderer.nextMode(); afterChange(); flash("Mode", renderer.modeName) }
+    func performNextPalette() { renderer.nextPalette(); afterChange(); flash("Palette", renderer.paletteName) }
+    func performPrevPalette() { renderer.prevPalette(); afterChange(); flash("Palette", renderer.paletteName) }
+    func performToggleColorCycle() {
+        renderer.toggleColorCycle(); afterChange()
+        flash("Colour Cycling", renderer.colorCycleOn ? "On" : "Off")
+    }
+    func performNextStyle() { renderer.nextStyle(); afterChange(); flash("Style", renderer.currentStyleName) }
+    func performPrevStyle() { renderer.prevStyle(); afterChange(); flash("Style", renderer.currentStyleName) }
+    func performSetStyle(_ i: Int) { renderer.setStyle(i); afterChange(); flash("Style", renderer.currentStyleName) }
+    func performAmp(_ d: Float) {
+        renderer.changeWaveAmp(d); afterChange()
+        flashLevel("Wave Amplitude", renderer.waveAmpValue, 0.1...3.0, decimals: 2)
+    }
+    func performDecay(_ d: Float) {
+        renderer.changeDecay(d); afterChange()
+        flashLevel("Feedback Decay", renderer.decayValue, 0.80...0.995, decimals: 3)
+    }
+    func performIntensity(_ d: Float) {
+        renderer.changeIntensity(d); afterChange()
+        flashLevel("Intensity", renderer.intensityValue, 0.2...4.0, decimals: 2)
+    }
+    func performSwirl(_ d: Float) {
+        renderer.changeSwirl(d); afterChange()
+        flashLevel("Swirl", renderer.swirlValue, -3.0...3.0, decimals: 2)
+    }
+    func performToggleSource() {
+        toggleAudioSource(); updateTitle()
+        flash("Source", currentSource?.name ?? "No audio")
+    }
+
+    private func afterChange() {
         updateTitle()
         rebuildStyleMenu()
     }
 
-    // MARK: - Controls menu actions
-    // Each mirrors a key in CthughaView.keyDown. refreshStyleMenu() updates the
-    // window title and keeps the Style checkmark in sync (manual tweaks that call
-    // markCustom() drop back to "Current").
-    @objc private func ctlNextMode(_ s: Any?) { renderer.nextMode(); refreshStyleMenu() }
-    @objc private func ctlNextPalette(_ s: Any?) { renderer.nextPalette(); refreshStyleMenu() }
-    @objc private func ctlPrevPalette(_ s: Any?) { renderer.prevPalette(); refreshStyleMenu() }
-    @objc private func ctlToggleColorCycle(_ s: Any?) { renderer.toggleColorCycle(); refreshStyleMenu() }
-    @objc private func ctlNextStyle(_ s: Any?) { renderer.nextStyle(); refreshStyleMenu() }
-    @objc private func ctlPrevStyle(_ s: Any?) { renderer.prevStyle(); refreshStyleMenu() }
-    @objc private func ctlAmpUp(_ s: Any?) { renderer.changeWaveAmp(0.1); refreshStyleMenu() }
-    @objc private func ctlAmpDown(_ s: Any?) { renderer.changeWaveAmp(-0.1); refreshStyleMenu() }
-    @objc private func ctlDecayUp(_ s: Any?) { renderer.changeDecay(0.005); refreshStyleMenu() }
-    @objc private func ctlDecayDown(_ s: Any?) { renderer.changeDecay(-0.005); refreshStyleMenu() }
-    @objc private func ctlIntensityUp(_ s: Any?) { renderer.changeIntensity(0.1); refreshStyleMenu() }
-    @objc private func ctlIntensityDown(_ s: Any?) { renderer.changeIntensity(-0.1); refreshStyleMenu() }
-    @objc private func ctlSwirlUp(_ s: Any?) { renderer.changeSwirl(0.25); refreshStyleMenu() }
-    @objc private func ctlSwirlDown(_ s: Any?) { renderer.changeSwirl(-0.25); refreshStyleMenu() }
-    @objc private func ctlToggleSource(_ s: Any?) { toggleAudioSource(); updateTitle() }
-    @objc private func ctlHelp(_ s: Any?) { AppDelegate.printHelp() }
+    private func flash(_ title: String, _ detail: String) {
+        hud.show("\(title)  ·  \(detail)", fraction: nil)
+    }
+
+    private func flashLevel(_ title: String, _ value: Float, _ range: ClosedRange<Float>, decimals: Int) {
+        let span = range.upperBound - range.lowerBound
+        let frac = span > 0 ? Double((value - range.lowerBound) / span) : 0
+        hud.show("\(title)  ·  \(String(format: "%.\(decimals)f", value))", fraction: frac)
+    }
+
+    // Lists every keyboard shortcut on the HUD (also mirrored to the console).
+    func showHelp() {
+        AppDelegate.printHelp()
+        hud.showList(AppDelegate.helpText)
+    }
+
+    // Thin @objc wrappers so the Controls menu triggers the same actions.
+    @objc private func ctlNextMode(_ s: Any?) { performNextMode() }
+    @objc private func ctlNextPalette(_ s: Any?) { performNextPalette() }
+    @objc private func ctlPrevPalette(_ s: Any?) { performPrevPalette() }
+    @objc private func ctlToggleColorCycle(_ s: Any?) { performToggleColorCycle() }
+    @objc private func ctlNextStyle(_ s: Any?) { performNextStyle() }
+    @objc private func ctlPrevStyle(_ s: Any?) { performPrevStyle() }
+    @objc private func ctlAmpUp(_ s: Any?) { performAmp(0.1) }
+    @objc private func ctlAmpDown(_ s: Any?) { performAmp(-0.1) }
+    @objc private func ctlDecayUp(_ s: Any?) { performDecay(0.005) }
+    @objc private func ctlDecayDown(_ s: Any?) { performDecay(-0.005) }
+    @objc private func ctlIntensityUp(_ s: Any?) { performIntensity(0.1) }
+    @objc private func ctlIntensityDown(_ s: Any?) { performIntensity(-0.1) }
+    @objc private func ctlSwirlUp(_ s: Any?) { performSwirl(0.25) }
+    @objc private func ctlSwirlDown(_ s: Any?) { performSwirl(-0.25) }
+    @objc private func ctlToggleSource(_ s: Any?) { performToggleSource() }
+    @objc private func ctlHelp(_ s: Any?) { showHelp() }
 
     private func rebuildSourceMenu() {
         guard let menu = sourceMenu else { return }
@@ -473,20 +523,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sender.state = newValue ? .on : .off
     }
 
+    static let helpText = """
+    Keyboard shortcuts
+    ──────────────────
+    space / m      Next motion mode
+    p              Next palette
+    ← ↓  /  → ↑    Previous / next palette
+    v / ⇧v         Next / previous style
+    c              Toggle colour cycling
+    i              Toggle audio source
+    + / −          Wave amplitude
+    , / .          Feedback decay
+    [ / ]          Intensity
+    9 / 0          Swirl strength
+    f              Toggle full screen
+    esc            Leave full screen
+    h              Show this list
+    """
+
     static func printHelp() {
-        NSLog("""
-        Cthugha controls:
-          space / m : next motion mode      p : next palette
-          ← ↓ / → ↑  : previous / next colour palette
-          v / ⇧v    : next / previous style  (Current, Solar Flare, Oil Shimmer,
-                                               Metallic Lightning, Blue Fire)
-          c         : toggle colour cycling i : toggle audio source (system/mic)
-          + / -     : wave amplitude        , / . : feedback decay
-          [ / ]     : intensity             9 / 0 : swirl strength
-          f         : full screen           esc : leave full screen   h : help
-          Source menu : pick a specific app (Spotify, Music, a browser…) to visualise
-          Style menu  : jump straight to a look preset
-        """)
+        NSLog("Cthugha controls:\n%@", helpText)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -501,6 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 final class RootView: NSView {
     weak var metalView: NSView?
     weak var overlay: NowPlayingOverlay?
+    weak var hud: HUDOverlay?
 
     override var isFlipped: Bool { false }
 
@@ -511,6 +568,13 @@ final class RootView: NSView {
             let s = overlay.intrinsicContentSize
             let w = min(s.width, bounds.width - 40)
             overlay.frame = NSRect(x: 20, y: 20, width: max(w, 0), height: s.height)
+        }
+        if let hud {
+            let s = hud.intrinsicContentSize
+            let w = min(s.width, bounds.width - 80)
+            let x = (bounds.width - w) / 2
+            let y = bounds.height * 0.17
+            hud.frame = NSRect(x: x, y: y, width: max(w, 0), height: s.height)
         }
     }
 }

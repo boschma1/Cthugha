@@ -471,6 +471,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     var paletteName: String {
         Renderer.paletteNames[min(paletteIndex, Renderer.paletteNames.count - 1)]
     }
+    var modeName: String { ["Flame", "Swirl", "Ripple", "Tunnel"][mode] }
+    var colorCycleOn: Bool { colorCycle }
+    var waveAmpValue: Float { waveAmp }
+    var decayValue: Float { decay }
+    var intensityValue: Float { intensityScale }
+    var swirlValue: Float { swirl }
     func toggleColorCycle() { colorCycle.toggle(); markCustom() }
     func changeWaveAmp(_ d: Float) { waveAmp = max(0.1, min(3.0, waveAmp + d)); markCustom() }
     func changeDecay(_ d: Float) { decay = max(0.80, min(0.995, decay + d)); markCustom() }

@@ -148,11 +148,16 @@ The icon is generated from `tools/MakeIcon.swift`. Regenerate it with:
 | `9` / `0` | Swirl strength |
 | `f` | Toggle full screen (also ⌃⌘F) |
 | `esc` | Leave full screen |
-| `h` | Print help to the console |
+| `h` | Show the keyboard-shortcut list on screen |
 
 The current mode/palette/source is shown in the window title. Every command
 above is also available from the **Controls** menu in the menu bar (with its
 shortcut shown), so you can drive the visuals without memorising the keys.
+
+Every keyboard or menu action also flashes a brief **on-screen display** (a
+centred HUD, like the macOS volume overlay) naming the setting it changed —
+with a level bar for the continuous controls. Pressing `h` shows the full
+shortcut list right on the visuals.
 
 ## How it works
 
