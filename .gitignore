@@ -1,0 +1,12 @@
+# Build output
+Cthugha.app/
+build/
+*.metallib
+
+# macOS
+.DS_Store
+
+# Editor / tooling
+*.swp
+.vscode/
+.idea/
