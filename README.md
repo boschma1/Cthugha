@@ -94,10 +94,18 @@ The menu bar has a **Source** menu that lists **All System Audio**, the
 **Microphone**, and every application that is currently producing sound
 (Spotify, Apple Music, a browser, …). Pick one to visualise just that app's
 output. This uses **Core Audio process taps** (macOS 14.4+) and needs **no
-Screen Recording permission** — selecting Spotify works instantly, and the app
-keeps playing normally while you watch. The menu refreshes each time you open
-it, so start playback first if an app isn't listed yet. The Dock badge shows a
-short tag for the selected app (e.g. `SPO`).
+Screen Recording permission** — but because macOS treats capturing any audio as
+microphone input, it does require **Microphone** access. Cthugha asks for it on
+first launch; if you declined, enable it under **System Settings → Privacy &
+Security → Microphone** and reselect the source. Selecting Spotify then works
+instantly and the app keeps playing normally while you watch. The menu refreshes
+each time you open it, so start playback first if an app isn't listed yet. The
+Dock badge shows a short tag for the selected app (e.g. `SPO`).
+
+> **Downloaded the release?** Move `Cthugha.app` into your **Applications**
+> folder before opening it. macOS runs a freshly downloaded app from a random,
+> read‑only quarantine location ("App Translocation") that can block audio
+> capture; running it from Applications fixes this.
 
 ### Style menu — one‑tap look presets
 Beyond the individual palette/motion controls, a **Style** menu (and the `v`

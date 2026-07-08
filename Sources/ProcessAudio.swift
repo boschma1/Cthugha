@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import CoreAudio
 import AudioToolbox
+import AVFoundation
 
 // A running application that is currently producing audio, together with the
 // Core Audio process object IDs that belong to it (an app such as a browser can
@@ -109,6 +110,37 @@ enum ProcessAudio {
             .filter { $0.bundleID == bid || $0.bundleID.hasPrefix(bid + ".") }
             .map { $0.objectID }
     }
+
+    // Whether Cthugha already holds Microphone (audio-input) authorization, which
+    // macOS also requires to capture another app's audio via a process tap.
+    static var isAudioInputAuthorized: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    // Prompt for Microphone (audio-input) access if it hasn't been decided yet.
+    // Called at launch so the permission dialog appears up front rather than the
+    // first per-app tap silently returning zeros.
+    @discardableResult
+    static func requestAudioInputAccess() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return true
+        case .notDetermined: return await AVCaptureDevice.requestAccess(for: .audio)
+        default: return false
+        }
+    }
+}
+
+// Thrown when a per-app tap can't capture because Microphone access is off, so
+// the UI can point the user straight at the relevant System Settings pane.
+enum ProcessTapError: LocalizedError {
+    case microphoneDenied(String)
+    var errorDescription: String? {
+        switch self {
+        case .microphoneDenied(let app):
+            return "\(app) audio can't be captured without Microphone access. " +
+                   "Enable it in System Settings ▸ Privacy & Security ▸ Microphone, then reselect the source."
+        }
+    }
 }
 
 // Captures the audio of one specific application via a private Core Audio
@@ -154,6 +186,13 @@ final class ProcessTapAudioSource: AudioSource {
         audioLock.lock(); lastAudioAt = CFAbsoluteTimeGetCurrent(); audioLock.unlock()
     }
 
+    // Ensure Microphone (audio-input) authorization before creating a tap; a tap
+    // built without it is created successfully but only ever delivers silence.
+    private static func ensureAudioInputAuthorized(for app: String) async throws {
+        if await ProcessAudio.requestAudioInputAccess() { return }
+        throw ProcessTapError.microphoneDenied(app)
+    }
+
     func start() async throws {
         // Re-resolve the app's audio process objects right now — the ids captured
         // when the menu was built can be stale by the time the user selects them.
@@ -165,6 +204,13 @@ final class ProcessTapAudioSource: AudioSource {
             throw NSError(domain: "Cthugha", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "\(name) is not producing audio."])
         }
+
+        // macOS treats capturing another app's audio through a Core Audio process
+        // tap as audio input, so the tap silently delivers *zeros* unless we hold
+        // Microphone (audio-input) authorization. Request it before creating the
+        // tap so a fresh install actually reacts instead of showing calm visuals.
+        try await Self.ensureAudioInputAuthorized(for: name)
+
         markAudio()
 
         // 1) Private tap that mixes the app's processes down to stereo while

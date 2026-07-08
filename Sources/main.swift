@@ -144,6 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         systemSource = SystemAudioSource(store: store)
         micSource = MicAudioSource(store: store)
         AppDelegate.printHelp()
+        // Per-app taps and the mic fallback both need Microphone (audio-input)
+        // authorization, so ask for it up front rather than only when the mic
+        // source happens to run — otherwise a per-app tap silently sees zeros.
+        Task { await ProcessAudio.requestAudioInputAccess() }
         startSystemAudio()
         updateTitle()
 
@@ -153,6 +157,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.rootView.needsLayout = true
         }
         nowPlaying.start()
+
+        warnIfTranslocated()
+    }
+
+    // A browser-downloaded (quarantined) app is run by Gatekeeper from a random
+    // read-only "App Translocation" path, which can break audio/permission grants.
+    // Nudge the user to move it into /Applications, where it runs normally.
+    private func warnIfTranslocated() {
+        guard Bundle.main.bundlePath.contains("/AppTranslocation/") else { return }
+        NSLog("Cthugha: running translocated — move Cthugha.app to Applications.")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.hud.showList("Move Cthugha to your Applications folder\n\n" +
+                "It is running from a temporary, read-only location (macOS Gatekeeper),\n" +
+                "which can block audio capture. Drag Cthugha.app into Applications,\n" +
+                "then reopen it.")
+        }
     }
 
     // MARK: - Audio management
@@ -260,6 +280,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSLog("Cthugha: capturing \(newSource.name).")
                 updateTitle()
                 startAppTapWatchdog(for: app.bundleID)
+            } catch let error as ProcessTapError {
+                // e.g. Microphone access is off — tell the user how to fix it and
+                // fall back to system audio so there's still something on screen.
+                NSLog("Cthugha: \(newSource.name) capture blocked: \(error.localizedDescription)")
+                hud.showList(error.localizedDescription)
+                startSystemAudio()
             } catch {
                 NSLog("Cthugha: \(newSource.name) capture failed: \(error.localizedDescription); " +
                       "falling back to system audio.")
