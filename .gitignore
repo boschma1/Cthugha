@@ -2,6 +2,7 @@
 Cthugha.app/
 build/
 *.metallib
+*.zip
 
 # macOS
 .DS_Store

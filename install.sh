@@ -18,7 +18,9 @@ rm -rf "$DEST/Cthugha.app"
 ditto Cthugha.app "$DEST/Cthugha.app"
 SIGN_ID="${CODESIGN_IDENTITY:-Developer ID Application: qualified.ink GmbH (5R57LQA4MP)}"
 if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
-    codesign --force --sign "$SIGN_ID" --identifier ink.qualified.cthugha "$DEST/Cthugha.app"
+    codesign --force --timestamp --options runtime \
+        --entitlements "Cthugha.entitlements" \
+        --sign "$SIGN_ID" --identifier ink.qualified.cthugha "$DEST/Cthugha.app"
 else
     codesign --force --sign - --identifier ink.qualified.cthugha "$DEST/Cthugha.app"
 fi

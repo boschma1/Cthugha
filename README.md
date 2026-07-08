@@ -30,11 +30,30 @@ the Metal toolchain is missing), bundles `Cthugha.app`, and signs it.
 `build.sh`/`install.sh` sign with a **stable identity** so macOS privacy grants
 (Screen Recording, Automation) survive rebuilds — ad‑hoc signing changes the
 code hash every build and makes macOS forget them. By default it uses the
-`Developer ID Application: qualified.ink GmbH (5R57LQA4MP)` certificate; override
-with `CODESIGN_IDENTITY="…"` (e.g. an Apple Development cert), or it falls back
-to ad‑hoc if the identity isn't in your keychain. The first install after
-switching identities asks you to grant permissions once more; after that,
-rebuilds keep them.
+`Developer ID Application: qualified.ink GmbH (5R57LQA4MP)` certificate with the
+**hardened runtime** enabled and the entitlements in `Cthugha.entitlements`
+(audio‑input + Apple Events); override the identity with `CODESIGN_IDENTITY="…"`
+(e.g. an Apple Development cert), or it falls back to ad‑hoc if the identity
+isn't in your keychain. The first install after switching identities asks you to
+grant permissions once more; after that, rebuilds keep them.
+
+### Notarization (release builds)
+The published release build is **notarized by Apple and stapled**, so it launches
+with no Gatekeeper warning. To notarize your own build:
+
+```bash
+# one-time: store an App Store Connect API key as a keychain profile
+xcrun notarytool store-credentials cthugha-notary \
+  --key AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer <issuer-uuid>
+
+./build.sh
+ditto -c -k --keepParent Cthugha.app Cthugha.zip
+xcrun notarytool submit Cthugha.zip --keychain-profile cthugha-notary --wait
+xcrun stapler staple Cthugha.app
+```
+
+Notarization requires the hardened runtime (already set by `build.sh`) and an
+in‑effect Apple Developer Program License Agreement for the signing team.
 
 ## Install
 

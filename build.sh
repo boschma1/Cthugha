@@ -46,9 +46,12 @@ else
 fi
 
 SIGN_ID="${CODESIGN_IDENTITY:-Developer ID Application: qualified.ink GmbH (5R57LQA4MP)}"
+ENTITLEMENTS="Cthugha.entitlements"
 if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
-    echo "Signing with '$SIGN_ID' (stable identity — keeps TCC grants)…"
-    codesign --force --sign "$SIGN_ID" --identifier ink.qualified.cthugha "$APP"
+    echo "Signing with '$SIGN_ID' (hardened runtime — required for notarization)…"
+    codesign --force --timestamp --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        --sign "$SIGN_ID" --identifier ink.qualified.cthugha "$APP"
 else
     echo "Identity '$SIGN_ID' not found — signing ad-hoc (permissions won't persist across rebuilds)."
     codesign --force --sign - --identifier ink.qualified.cthugha "$APP"
