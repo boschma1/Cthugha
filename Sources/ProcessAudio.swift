@@ -99,6 +99,16 @@ enum ProcessAudio {
             .map { AudioApp(bundleID: $0.key, name: $0.value.name, objectIDs: $0.value.ids) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
+
+    // The Core Audio process objects that currently belong to one app (matched by
+    // its bundle id, including helper processes such as com.google.Chrome.helper).
+    // Re-resolved on demand so a tap always targets the app's *current* audio
+    // processes, which change across track switches, pause/resume and re-inits.
+    static func objectIDs(forBundleID bid: String) -> [AudioObjectID] {
+        audioProcesses()
+            .filter { $0.bundleID == bid || $0.bundleID.hasPrefix(bid + ".") }
+            .map { $0.objectID }
+    }
 }
 
 // Captures the audio of one specific application via a private Core Audio
@@ -109,12 +119,21 @@ final class ProcessTapAudioSource: AudioSource {
     var badgeTag: String
 
     private let store: WaveformStore
-    private let objectIDs: [AudioObjectID]
+    private var objectIDs: [AudioObjectID]
     private let ioQueue = DispatchQueue(label: "ink.qualified.cthugha.tap")
 
     private var tapID = AudioObjectID(0)
     private var aggregateID = AudioObjectID(0)
     private var ioProcID: AudioDeviceIOProcID?
+
+    // Timestamp of the last non-silent buffer, so a watchdog can notice when a
+    // tap has gone silent (e.g. its process object went stale) and rebuild it.
+    private let audioLock = NSLock()
+    private var lastAudioAt: CFAbsoluteTime = 0
+
+    // The process objects this tap is currently listening to (re-resolved at
+    // start), exposed so the watchdog can tell whether fresher objects exist.
+    private(set) var activeObjectIDs: [AudioObjectID] = []
 
     init(app: AudioApp, store: WaveformStore) {
         self.name = app.name
@@ -124,11 +143,29 @@ final class ProcessTapAudioSource: AudioSource {
         self.objectIDs = app.objectIDs
     }
 
+    func secondsSinceAudio() -> CFAbsoluteTime {
+        audioLock.lock(); defer { audioLock.unlock() }
+        return CFAbsoluteTimeGetCurrent() - lastAudioAt
+    }
+
+    // Synchronous so it is safe to call from both the async `start()` and the
+    // real-time IOProc without tripping Swift's async-context lock checks.
+    private func markAudio() {
+        audioLock.lock(); lastAudioAt = CFAbsoluteTimeGetCurrent(); audioLock.unlock()
+    }
+
     func start() async throws {
+        // Re-resolve the app's audio process objects right now — the ids captured
+        // when the menu was built can be stale by the time the user selects them.
+        let fresh = ProcessAudio.objectIDs(forBundleID: bundleID)
+        if !fresh.isEmpty { objectIDs = fresh }
+        activeObjectIDs = objectIDs
+
         guard !objectIDs.isEmpty else {
             throw NSError(domain: "Cthugha", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "\(name) is not producing audio."])
         }
+        markAudio()
 
         // 1) Private tap that mixes the app's processes down to stereo while
         //    leaving playback audible (.unmuted).
@@ -180,10 +217,13 @@ final class ProcessTapAudioSource: AudioSource {
         // 4) IOProc that downmixes each buffer to mono and feeds the store.
         let store = self.store
         status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, agg, ioQueue) {
-            _, inInputData, _, _, _ in
+            [weak self] _, inInputData, _, _, _ in
             let abl = UnsafeMutableAudioBufferListPointer(
                 UnsafeMutablePointer(mutating: inInputData))
-            ProcessTapAudioSource.pushMono(abl, channels: channels, to: store)
+            let peak = ProcessTapAudioSource.pushMono(abl, channels: channels, to: store)
+            if peak > 0.002, let self {
+                self.markAudio()
+            }
         }
         guard status == noErr else {
             teardown()
@@ -213,30 +253,34 @@ final class ProcessTapAudioSource: AudioSource {
         if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
     }
 
+    @discardableResult
     private static func pushMono(_ abl: UnsafeMutableAudioBufferListPointer,
-                                 channels: Int, to store: WaveformStore) {
-        guard abl.count > 0 else { return }
+                                 channels: Int, to store: WaveformStore) -> Float {
+        guard abl.count > 0 else { return 0 }
+        var peak: Float = 0
         if abl.count == 1 {
             // Interleaved.
             let buf = abl[0]
-            guard let data = buf.mData else { return }
+            guard let data = buf.mData else { return 0 }
             let ch = max(1, channels)
             let total = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
             let frames = total / ch
-            guard frames > 0 else { return }
+            guard frames > 0 else { return 0 }
             let ptr = data.assumingMemoryBound(to: Float.self)
             var out = [Float](repeating: 0, count: frames)
             for f in 0..<frames {
                 var acc: Float = 0
                 for c in 0..<ch { acc += ptr[f * ch + c] }
-                out[f] = acc / Float(ch)
+                let v = acc / Float(ch)
+                out[f] = v
+                peak = max(peak, abs(v))
             }
             store.push(out)
         } else {
             // Non-interleaved / planar: one buffer per channel.
             let ch = abl.count
             let frames = Int(abl[0].mDataByteSize) / MemoryLayout<Float>.size
-            guard frames > 0 else { return }
+            guard frames > 0 else { return 0 }
             var out = [Float](repeating: 0, count: frames)
             for c in 0..<ch {
                 guard let data = abl[c].mData else { continue }
@@ -244,8 +288,9 @@ final class ProcessTapAudioSource: AudioSource {
                 let n = min(frames, Int(abl[c].mDataByteSize) / MemoryLayout<Float>.size)
                 for f in 0..<n { out[f] += ptr[f] }
             }
-            for f in 0..<frames { out[f] /= Float(ch) }
+            for f in 0..<frames { out[f] /= Float(ch); peak = max(peak, abs(out[f])) }
             store.push(out)
         }
+        return peak
     }
 }

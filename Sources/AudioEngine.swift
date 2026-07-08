@@ -44,6 +44,15 @@ final class WaveformStore {
         lock.unlock()
         return out
     }
+
+    // Reset the auto-gain envelope so a newly-selected source adapts to its own
+    // level immediately instead of inheriting the previous source's loudness
+    // (whose slow decay otherwise leaves a quieter source looking near-flat).
+    func resetGain() {
+        lock.lock()
+        peak = 0.02
+        lock.unlock()
+    }
 }
 
 protocol AudioSource: AnyObject {

@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var micSource: MicAudioSource!
     private var currentSource: AudioSource?
     private var systemRetryTimer: Timer?
+    private var appTapWatchdog: Timer?
 
     private let startFullScreenKey = "StartFullScreen"
     private var startFullScreenItem: NSMenuItem?
@@ -162,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try await systemSource.start()
                 micSource.stop()
                 currentSource = systemSource
+                store.resetGain()
                 systemRetryTimer?.invalidate(); systemRetryTimer = nil
                 NSLog("Cthugha: capturing system audio.")
                 updateTitle()
@@ -186,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     try await self.systemSource.start()
                     self.micSource.stop()
                     self.currentSource = self.systemSource
+                    self.store.resetGain()
                     self.systemRetryTimer?.invalidate(); self.systemRetryTimer = nil
                     NSLog("Cthugha: system audio now available — switched from microphone.")
                     self.updateTitle()
@@ -201,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try await micSource.start()
             currentSource = micSource
+            store.resetGain()
         } catch {
             NSLog("Cthugha: microphone unavailable: \(error.localizedDescription)")
             currentSource = nil
@@ -209,8 +213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func toggleAudioSource() {
-        // Manual switch takes over from the automatic retry.
+        // Manual switch takes over from the automatic retry / watchdog.
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
+        appTapWatchdog?.invalidate(); appTapWatchdog = nil
         currentSource?.stop()
         Task { @MainActor in
             if currentSource === systemSource {
@@ -225,12 +230,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func selectSystemSource(_ sender: Any?) {
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
+        appTapWatchdog?.invalidate(); appTapWatchdog = nil
         currentSource?.stop()
         startSystemAudio()
     }
 
     @objc private func selectMicSource(_ sender: Any?) {
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
+        appTapWatchdog?.invalidate(); appTapWatchdog = nil
         let old = currentSource
         Task { @MainActor in
             old?.stop()
@@ -241,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectAppSource(_ sender: NSMenuItem) {
         guard let app = sender.representedObject as? AudioApp else { return }
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
+        appTapWatchdog?.invalidate(); appTapWatchdog = nil
         let old = currentSource
         let newSource = ProcessTapAudioSource(app: app, store: store)
         Task { @MainActor in
@@ -248,12 +256,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 try await newSource.start()
                 currentSource = newSource
+                store.resetGain()
                 NSLog("Cthugha: capturing \(newSource.name).")
                 updateTitle()
+                startAppTapWatchdog(for: app.bundleID)
             } catch {
                 NSLog("Cthugha: \(newSource.name) capture failed: \(error.localizedDescription); " +
                       "falling back to system audio.")
                 startSystemAudio()
+            }
+        }
+    }
+
+    // Watches an active per-app tap and rebuilds it if it falls silent while the
+    // app's audio processes have changed (track change, pause/resume, engine
+    // re-init) — a cached process-object id can otherwise keep delivering silence.
+    private func startAppTapWatchdog(for bundleID: String) {
+        appTapWatchdog?.invalidate()
+        appTapWatchdog = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self,
+                  let tap = self.currentSource as? ProcessTapAudioSource,
+                  tap.bundleID == bundleID else { return }
+            // Still receiving audio → nothing to do.
+            guard tap.secondsSinceAudio() > 3 else { return }
+            // Silent: only rebuild if fresh, *different* process objects exist
+            // (if the app is simply paused there are none, so we leave it be).
+            let fresh = ProcessAudio.objectIDs(forBundleID: bundleID)
+            guard !fresh.isEmpty, fresh != tap.activeObjectIDs else { return }
+            Task { @MainActor in
+                guard self.currentSource === tap else { return }
+                tap.stop()
+                let app = AudioApp(bundleID: bundleID, name: tap.name, objectIDs: fresh)
+                let rebuilt = ProcessTapAudioSource(app: app, store: self.store)
+                do {
+                    try await rebuilt.start()
+                    self.currentSource = rebuilt
+                    self.store.resetGain()
+                    NSLog("Cthugha: reattached tap for \(rebuilt.name) (audio process changed).")
+                    self.updateTitle()
+                } catch {
+                    NSLog("Cthugha: could not reattach \(app.name): \(error.localizedDescription)")
+                }
             }
         }
     }
