@@ -1,5 +1,6 @@
 import Cocoa
 import MetalKit
+import IOKit.pwr_mgt
 
 // MTKView subclass that owns keyboard controls.
 final class CthughaView: MTKView {
@@ -98,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // Whether we currently hold an NSCursor.hide() (balanced with unhide()).
     private var cursorHidden = false
 
+    // Power assertion held while full screen is active so the screensaver /
+    // display sleep can't kick in mid-visualisation. 0 means "not held".
+    private var sleepAssertionID: IOPMAssertionID = 0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system.")
@@ -180,23 +185,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // Hide the mouse pointer while full screen is active — covers every entry
     // path (double-click, the `f` key, the View menu, and the --fullscreen /
-    // saved preset) — and restore it when leaving full screen.
+    // saved preset) — and restore it when leaving full screen. The screensaver
+    // and display sleep are suppressed for the same window.
     func windowDidEnterFullScreen(_ notification: Notification) {
         setCursorHidden(true)
+        setScreensaverPrevented(true)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         setCursorHidden(false)
+        setScreensaverPrevented(false)
     }
 
     func windowWillClose(_ notification: Notification) {
         setCursorHidden(false)
+        setScreensaverPrevented(false)
     }
 
     private func setCursorHidden(_ hidden: Bool) {
         guard hidden != cursorHidden else { return }
         cursorHidden = hidden
         if hidden { NSCursor.hide() } else { NSCursor.unhide() }
+    }
+
+    // Hold an IOKit power assertion while full screen so macOS won't start the
+    // screensaver or idle-sleep the display. Balanced: create once, release once.
+    private func setScreensaverPrevented(_ prevented: Bool) {
+        if prevented {
+            guard sleepAssertionID == 0 else { return }
+            IOPMAssertionCreateWithName(
+                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                "Cthugha full-screen visualiser" as CFString,
+                &sleepAssertionID)
+        } else {
+            guard sleepAssertionID != 0 else { return }
+            IOPMAssertionRelease(sleepAssertionID)
+            sleepAssertionID = 0
+        }
     }
 
     // A browser-downloaded (quarantined) app is run by Gatekeeper from a random
