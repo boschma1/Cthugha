@@ -155,9 +155,13 @@ The icon is generated from `tools/MakeIcon.swift`. Regenerate it with:
 | `,` / `.` | Feedback decay (trail length) |
 | `[` / `]` | Intensity / brightness |
 | `9` / `0` | Swirl strength |
-| `f` | Toggle full screen (also ⌃⌘F) |
+| `f` | Toggle full screen (also ⌃⌘F, or double-click the window) |
 | `esc` | Leave full screen |
 | `h` | Show the keyboard-shortcut list on screen |
+
+Double-clicking anywhere in the visualiser toggles full screen, and while full
+screen is active the mouse pointer is hidden. Move out of full screen (`esc` or
+another double-click) to get the pointer back.
 
 The current mode/palette/source is shown in the window title. Every command
 above is also available from the **Controls** menu in the menu bar (with its

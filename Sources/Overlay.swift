@@ -36,6 +36,10 @@ final class NowPlayingOverlay: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    // Purely decorative — let mouse events (e.g. the double-click that toggles
+    // full screen) pass through to the visualiser underneath.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     override var intrinsicContentSize: NSSize {
         let s = label.intrinsicContentSize
         return NSSize(width: s.width + 28, height: 36)
@@ -143,6 +147,9 @@ final class HUDOverlay: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private var listMode = false
+
+    // Transient HUD — let mouse events pass through to the visualiser underneath.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override var intrinsicContentSize: NSSize {
         let s = titleLabel.intrinsicContentSize

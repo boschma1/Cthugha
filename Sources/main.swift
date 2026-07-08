@@ -8,6 +8,16 @@ final class CthughaView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // Double-click anywhere in the visualiser toggles full screen; the cursor is
+    // then hidden by the window delegate (single clicks fall through as normal).
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            window?.toggleFullScreen(nil)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let ad = appDelegate else { return }
 
@@ -64,7 +74,7 @@ final class CthughaView: MTKView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var rootView: RootView!
     private var overlay: NowPlayingOverlay!
@@ -84,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var startFullScreenItem: NSMenuItem?
     private var sourceMenu: NSMenu?
     private var styleMenu: NSMenu?
+
+    // Whether we currently hold an NSCursor.hide() (balanced with unhide()).
+    private var cursorHidden = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -128,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rootView.addSubview(hud)
 
         window.contentView = rootView
+        window.delegate = self
         window.makeFirstResponder(view)
         window.makeKeyAndOrderFront(nil)
 
@@ -160,6 +174,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nowPlaying.start()
 
         warnIfTranslocated()
+    }
+
+    // MARK: - Full screen (NSWindowDelegate)
+
+    // Hide the mouse pointer while full screen is active — covers every entry
+    // path (double-click, the `f` key, the View menu, and the --fullscreen /
+    // saved preset) — and restore it when leaving full screen.
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        setCursorHidden(true)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        setCursorHidden(false)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        setCursorHidden(false)
+    }
+
+    private func setCursorHidden(_ hidden: Bool) {
+        guard hidden != cursorHidden else { return }
+        cursorHidden = hidden
+        if hidden { NSCursor.hide() } else { NSCursor.unhide() }
     }
 
     // A browser-downloaded (quarantined) app is run by Gatekeeper from a random
@@ -607,7 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     , / .          Feedback decay
     [ / ]          Intensity
     9 / 0          Swirl strength
-    f              Toggle full screen
+    f              Toggle full screen (or double-click the window)
     esc            Leave full screen
     h              Show this list
     """
