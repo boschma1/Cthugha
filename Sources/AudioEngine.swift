@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
+import CoreAudio
+import AudioToolbox
 
 // Thread-safe store of the most recent audio samples (mono, auto-gained).
 final class WaveformStore {
@@ -188,7 +190,7 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
 final class MicAudioSource: AudioSource {
     let name = "Microphone"
     private let store: WaveformStore
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
 
     init(store: WaveformStore) { self.store = store }
 
@@ -198,8 +200,35 @@ final class MicAudioSource: AudioSource {
             throw NSError(domain: "Cthugha", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Microphone access denied."])
         }
+
+        // Rebuild the engine on every start. The input hardware can change while
+        // the app runs (e.g. a Bluetooth mic disconnects, or the machine slept),
+        // which leaves the cached input node reporting a stale/invalid format;
+        // a fresh engine always queries the current default input. This also
+        // guarantees no leftover tap is installed on bus 0.
+        engine.stop()
+        engine = AVAudioEngine()
         let input = engine.inputNode
+
+        // Never capture from a Bluetooth headset's microphone: opening a BT input
+        // forces the headset off the high-quality A2DP playback profile and onto
+        // the mono "hands-free" (HFP) profile, which makes music sound thin and
+        // bass-less. If the current default input is Bluetooth, capture from the
+        // built-in microphone instead so playback quality is left untouched.
+        Self.avoidBluetoothInput(on: input)
+
+        // When no usable input device is available the format comes back as
+        // 0 Hz / 0 channels. Installing a tap with such a format makes AVFAudio
+        // raise an Objective-C NSException, which Swift cannot catch — so the
+        // whole process would abort (SIGABRT). Validate up front and throw a
+        // normal Swift error instead, letting callers fall back gracefully.
         let format = input.outputFormat(forBus: 0)
+        guard format.channelCount > 0, format.sampleRate > 0 else {
+            throw NSError(domain: "Cthugha", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey:
+                                        "No usable microphone input is available right now."])
+        }
+
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self, let ch = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
@@ -219,5 +248,78 @@ final class MicAudioSource: AudioSource {
     func stop() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+    }
+
+    // If the default input device is a Bluetooth headset, point the engine's
+    // input at the built-in microphone instead so playback stays on A2DP.
+    private static func avoidBluetoothInput(on input: AVAudioInputNode) {
+        let current = defaultInputDevice()
+        guard current == 0 || isBluetooth(current) else { return }
+        guard let builtIn = builtInInputDevice(), builtIn != current,
+              let unit = input.audioUnit else { return }
+        var dev = builtIn
+        AudioUnitSetProperty(unit,
+                             kAudioOutputUnitProperty_CurrentDevice,
+                             kAudioUnitScope_Global, 0,
+                             &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
+    }
+
+    private static func systemDevices() -> [AudioDeviceID] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &devices) == noErr else { return [] }
+        return devices
+    }
+
+    private static func defaultInputDevice() -> AudioDeviceID {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var dev = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev)
+        return dev
+    }
+
+    private static func transportType(_ dev: AudioDeviceID) -> UInt32 {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &transport)
+        return transport
+    }
+
+    private static func isBluetooth(_ dev: AudioDeviceID) -> Bool {
+        let t = transportType(dev)
+        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    private static func hasInputChannels(_ dev: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(dev, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
+                                                   alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, raw) == noErr else { return false }
+        let abl = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+        return abl.contains { $0.mNumberChannels > 0 }
+    }
+
+    private static func builtInInputDevice() -> AudioDeviceID? {
+        systemDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && hasInputChannels($0) }
     }
 }

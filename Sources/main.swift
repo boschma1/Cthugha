@@ -284,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @MainActor
-    private func startMic() async {
+    private func startMic(announceFailure: Bool = false) async {
         do {
             try await micSource.start()
             currentSource = micSource
@@ -292,6 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } catch {
             NSLog("Cthugha: microphone unavailable: \(error.localizedDescription)")
             currentSource = nil
+            if announceFailure {
+                hud.showList(error.localizedDescription)
+            }
         }
         updateTitle()
     }
@@ -303,7 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         currentSource?.stop()
         Task { @MainActor in
             if currentSource === systemSource {
-                await startMic()
+                await startMic(announceFailure: true)
             } else {
                 startSystemAudio()
             }
@@ -325,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let old = currentSource
         Task { @MainActor in
             old?.stop()
-            await startMic()
+            await startMic(announceFailure: true)
         }
     }
 
