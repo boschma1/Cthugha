@@ -6,7 +6,7 @@
 #
 # Why this exists: build.sh/install.sh only *sign* the app. A signed-but-not-
 # notarized Developer ID app trips Gatekeeper once downloaded ("Apple could not
-# verify…"). This script performs the notarize + staple steps that every
+# verify..."). This script performs the notarize + staple steps that every
 # published build needs, so they can never be skipped by accident.
 #
 # Overridable via env:
@@ -16,7 +16,7 @@
 #
 # Usage:
 #   ./release.sh                 # release the current Info.plist version
-#   ./release.sh --notes "…"     # custom release notes (default is auto-generated)
+#   ./release.sh --notes "..."     # custom release notes (default is auto-generated)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -57,10 +57,10 @@ fi
 # --- Notarize ----------------------------------------------------------------
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-echo "Zipping for notarization…"
+echo "Zipping for notarization..."
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$WORK/notarize.zip"
 
-echo "Submitting to Apple notary service (this can take a few minutes)…"
+echo "Submitting to Apple notary service (this can take a few minutes)..."
 SUBMIT_OUT="$(xcrun notarytool submit "$WORK/notarize.zip" \
     --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)"
 echo "$SUBMIT_OUT"
@@ -70,13 +70,13 @@ if ! grep -q "status: Accepted" <<<"$SUBMIT_OUT"; then
 fi
 
 # --- Staple + verify ---------------------------------------------------------
-echo "Stapling ticket…"
+echo "Stapling ticket..."
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 spctl -a -vvv --type exec "$APP"
 
 # --- Package the stapled app -------------------------------------------------
-echo "Packaging $ASSET…"
+echo "Packaging $ASSET..."
 rm -f "$ASSET"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ASSET"
 
@@ -91,10 +91,10 @@ fi
 
 export GH_TOKEN="${GH_TOKEN:-$(gh auth token)}"
 if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-    echo "Updating existing release $TAG…"
+    echo "Updating existing release $TAG..."
     gh release upload "$TAG" -R "$REPO" "$ASSET#$ASSET" --clobber
 else
-    echo "Creating release $TAG…"
+    echo "Creating release $TAG..."
     gh release create "$TAG" -R "$REPO" \
         --title "Cthugha $VERSION" \
         --notes "$NOTES" \
