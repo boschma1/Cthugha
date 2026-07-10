@@ -142,7 +142,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Styles (named look presets)
 
-    struct StyleParams {
+    struct StyleParams: Codable {
         var paletteIndex: Int
         var mode: Int
         var decay: Float
@@ -153,6 +153,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         var waveBrightness: Float
         var colorCycle: Bool
         var mirror: Float
+    }
+
+    // A persistable snapshot of the whole adjustable look: the live parameters,
+    // which named style is selected, and the user's saved "Current" custom look so
+    // toggling back to it after a preset still restores the right values.
+    struct Settings: Codable {
+        var styleIndex: Int
+        var params: StyleParams
+        var savedCustom: StyleParams?
     }
 
     // The fixed variations offered by the Style toggle (in addition to "Current").
@@ -196,6 +205,33 @@ final class Renderer: NSObject, MTKViewDelegate {
         waveBrightness = p.waveBrightness
         colorCycle = p.colorCycle
         mirror = p.mirror
+    }
+
+    // MARK: - Persistence
+
+    // Snapshot the current look so it can be saved and restored across launches.
+    func exportSettings() -> Settings {
+        Settings(styleIndex: styleIndex, params: currentParams(), savedCustom: savedCustom)
+    }
+
+    // Restore a previously saved look. Values are clamped to the ranges this build
+    // supports so a settings file written by another version can never index a
+    // palette/mode that no longer exists.
+    func restoreSettings(_ s: Settings) {
+        applyParams(clamp(s.params))
+        savedCustom = s.savedCustom.map(clamp)
+        styleIndex = min(max(s.styleIndex, 0), Renderer.styleCount - 1)
+    }
+
+    private func clamp(_ p: StyleParams) -> StyleParams {
+        var p = p
+        p.paletteIndex = min(max(p.paletteIndex, 0), paletteCount - 1)
+        p.mode = min(max(p.mode, 0), 3)
+        p.decay = min(max(p.decay, 0.80), 0.995)
+        p.waveAmp = min(max(p.waveAmp, 0.1), 3.0)
+        p.intensityScale = min(max(p.intensityScale, 0.2), 4.0)
+        p.swirl = min(max(p.swirl, -3.0), 3.0)
+        return p
     }
 
     var currentStyleName: String { Renderer.styleName(styleIndex) }

@@ -2,6 +2,15 @@ import Cocoa
 import MetalKit
 import IOKit.pwr_mgt
 
+// The audio source to reopen on the next launch. Persisted (JSON) in UserDefaults
+// so Cthugha reopens whatever the user last chose: system audio, the microphone,
+// or a specific application's audio (remembered by bundle id).
+enum SavedSource: Codable {
+    case system
+    case microphone
+    case app(bundleID: String, name: String)
+}
+
 // MTKView subclass that owns keyboard controls.
 final class CthughaView: MTKView {
     weak var renderer: Renderer?
@@ -92,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var appTapWatchdog: Timer?
 
     private let startFullScreenKey = "StartFullScreen"
+    private let rendererSettingsKey = "RendererSettings"
+    private let audioSourceKey = "AudioSource"
     private var startFullScreenItem: NSMenuItem?
     private var sourceMenu: NSMenu?
     private var styleMenu: NSMenu?
@@ -153,6 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         buildMenu()
         NSApp.activate(ignoringOtherApps: true)
 
+        // Restore the look (style, palette, mode, amp, decay…) from the last run.
+        if let saved = loadRendererSettings() {
+            renderer.restoreSettings(saved)
+            rebuildStyleMenu()
+        }
+
         // Full-screen preset: --fullscreen flag or a saved preference.
         let wantFullScreen = CommandLine.arguments.contains("--fullscreen")
             || UserDefaults.standard.bool(forKey: startFullScreenKey)
@@ -166,9 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // The microphone source and the system-audio mic fallback need Microphone
         // (audio-input) authorization, so ask for it up front. Per-app taps and the
         // ScreenCaptureKit system-audio path instead need "Screen & System Audio
-        // Recording", whose prompt is surfaced by startSystemAudio() below.
+        // Recording", whose prompt is surfaced when a capture starts below.
         Task { await ProcessAudio.requestAudioInputAccess() }
-        startSystemAudio()
+        restoreAudioSource()
         updateTitle()
 
         // Now-playing overlay (Spotify / Apple Music).
@@ -303,9 +320,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Manual switch takes over from the automatic retry / watchdog.
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
         appTapWatchdog?.invalidate(); appTapWatchdog = nil
+        let switchingToMic = (currentSource === systemSource)
         currentSource?.stop()
+        saveAudioSource(switchingToMic ? .microphone : .system)
         Task { @MainActor in
-            if currentSource === systemSource {
+            if switchingToMic {
                 await startMic(announceFailure: true)
             } else {
                 startSystemAudio()
@@ -318,6 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func selectSystemSource(_ sender: Any?) {
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
         appTapWatchdog?.invalidate(); appTapWatchdog = nil
+        saveAudioSource(.system)
         currentSource?.stop()
         startSystemAudio()
     }
@@ -325,6 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func selectMicSource(_ sender: Any?) {
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
         appTapWatchdog?.invalidate(); appTapWatchdog = nil
+        saveAudioSource(.microphone)
         let old = currentSource
         Task { @MainActor in
             old?.stop()
@@ -334,8 +355,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func selectAppSource(_ sender: NSMenuItem) {
         guard let app = sender.representedObject as? AudioApp else { return }
+        activateAppSource(app)
+    }
+
+    // Start (or restore) a per-app tap. Shared by the Source menu and by
+    // restoreAudioSource() at launch.
+    func activateAppSource(_ app: AudioApp) {
         systemRetryTimer?.invalidate(); systemRetryTimer = nil
         appTapWatchdog?.invalidate(); appTapWatchdog = nil
+        saveAudioSource(.app(bundleID: app.bundleID, name: app.name))
         let old = currentSource
         let newSource = ProcessTapAudioSource(app: app, store: store)
         Task { @MainActor in
@@ -577,6 +605,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func afterChange() {
         updateTitle()
         rebuildStyleMenu()
+        saveRendererSettings()
+    }
+
+    // MARK: - Settings persistence
+
+    // Save the current look so the next launch reopens with it. Called after every
+    // visual change (mode, palette, style, amp, decay, intensity, swirl, cycle).
+    private func saveRendererSettings() {
+        guard let renderer,
+              let data = try? JSONEncoder().encode(renderer.exportSettings()) else { return }
+        UserDefaults.standard.set(data, forKey: rendererSettingsKey)
+    }
+
+    private func loadRendererSettings() -> Renderer.Settings? {
+        guard let data = UserDefaults.standard.data(forKey: rendererSettingsKey) else { return nil }
+        return try? JSONDecoder().decode(Renderer.Settings.self, from: data)
+    }
+
+    // Remember which audio source the user chose, so the next launch reopens it.
+    private func saveAudioSource(_ source: SavedSource) {
+        guard let data = try? JSONEncoder().encode(source) else { return }
+        UserDefaults.standard.set(data, forKey: audioSourceKey)
+    }
+
+    private func loadAudioSource() -> SavedSource? {
+        guard let data = UserDefaults.standard.data(forKey: audioSourceKey) else { return nil }
+        return try? JSONDecoder().decode(SavedSource.self, from: data)
+    }
+
+    // Reopen the audio source saved from the previous run. Falls back to system
+    // audio when nothing was saved, or when a remembered app isn't currently
+    // producing audio (so there's always something on screen).
+    private func restoreAudioSource() {
+        switch loadAudioSource() {
+        case .microphone:
+            Task { @MainActor in
+                await startMic(announceFailure: false)
+                if currentSource == nil { startSystemAudio() }
+            }
+        case .app(let bundleID, let name):
+            let ids = ProcessAudio.objectIDs(forBundleID: bundleID)
+            guard !ids.isEmpty else {
+                NSLog("Cthugha: remembered source '\(name)' isn't producing audio right now; " +
+                      "using system audio.")
+                startSystemAudio()
+                return
+            }
+            activateAppSource(AudioApp(bundleID: bundleID, name: name, objectIDs: ids))
+        case .system, .none:
+            startSystemAudio()
+        }
     }
 
     private func flash(_ title: String, _ detail: String) {
