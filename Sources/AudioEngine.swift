@@ -131,6 +131,145 @@ func monoSamples(from sampleBuffer: CMSampleBuffer) -> [Float] {
     return out
 }
 
+// Shared Core Audio device helpers used by both the system-audio and microphone
+// capture paths. Bluetooth headsets expose their microphone as a separate input
+// endpoint; the moment anything opens that input the headset is forced off the
+// high-quality stereo A2DP playback profile and onto the mono "hands-free" (HFP)
+// profile, which makes music sound thin and bass-less. These helpers let the
+// capture paths steer the system default input away from Bluetooth.
+enum AudioDevices {
+    static func all() -> [AudioDeviceID] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &devices) == noErr else { return [] }
+        return devices
+    }
+
+    static func defaultInput() -> AudioDeviceID {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var dev = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev)
+        return dev
+    }
+
+    @discardableResult
+    static func setDefaultInput(_ dev: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value = dev
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &value)
+        return status == noErr
+    }
+
+    static func transportType(_ dev: AudioDeviceID) -> UInt32 {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &transport)
+        return transport
+    }
+
+    static func isBluetooth(_ dev: AudioDeviceID) -> Bool {
+        let t = transportType(dev)
+        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    static func hasInputChannels(_ dev: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(dev, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
+                                                   alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, raw) == noErr else { return false }
+        let abl = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+        return abl.contains { $0.mNumberChannels > 0 }
+    }
+
+    // A physical input is neither a virtual driver (e.g. conferencing apps, which
+    // carry no live signal) nor an aggregate (which could re-include the Bluetooth
+    // mic and re-trigger the HFP switch).
+    static func isPhysicalInput(_ dev: AudioDeviceID) -> Bool {
+        let t = transportType(dev)
+        return t != kAudioDeviceTransportTypeVirtual && t != kAudioDeviceTransportTypeAggregate
+    }
+
+    // The best non-Bluetooth input: the built-in mic if present, otherwise any
+    // other wired/USB input. Returns nil if the only inputs are Bluetooth/virtual.
+    static func preferredNonBluetoothInput() -> AudioDeviceID? {
+        let inputs = all().filter {
+            hasInputChannels($0) && !isBluetooth($0) && isPhysicalInput($0)
+        }
+        if let builtIn = inputs.first(where: { transportType($0) == kAudioDeviceTransportTypeBuiltIn }) {
+            return builtIn
+        }
+        return inputs.first
+    }
+
+    static func name(_ dev: AudioDeviceID) -> String {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &name) == noErr else { return "input" }
+        return (name?.takeRetainedValue() as String?) ?? "input"
+    }
+}
+
+// Keeps a Bluetooth headset on high-quality stereo A2DP playback while Cthugha is
+// capturing audio. On macOS 26 every audio-capture mechanism we use (the
+// ScreenCaptureKit system-audio stream and Core Audio process taps) activates the
+// system default *input* device; when that input is a Bluetooth headset the
+// headset is forced onto the mono hands-free (HFP) profile and the user's music
+// suddenly sounds thin and bass-less. While a capture is running we steer the
+// default input to a non-Bluetooth device (built-in / USB mic) and restore the
+// user's original choice when it stops. We never need the microphone to capture
+// output audio, so this doesn't affect what Cthugha records.
+final class BluetoothPlaybackGuard {
+    private var savedInput: AudioDeviceID = 0
+
+    func engage(reason: String) {
+        guard savedInput == 0 else { return }
+        let current = AudioDevices.defaultInput()
+        guard current != 0, AudioDevices.isBluetooth(current) else { return }
+        guard let safe = AudioDevices.preferredNonBluetoothInput() else { return }
+        if AudioDevices.setDefaultInput(safe) {
+            savedInput = current
+            NSLog("Cthugha: steered default input to '\(AudioDevices.name(safe))' \(reason)")
+        }
+    }
+
+    func release() {
+        guard savedInput != 0 else { return }
+        if AudioDevices.all().contains(savedInput) {
+            AudioDevices.setDefaultInput(savedInput)
+        }
+        savedInput = 0
+    }
+}
+
 // System audio capture via ScreenCaptureKit (macOS 13+, fully supported on 26).
 final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStreamOutput {
     let name = "System audio"
@@ -138,13 +277,24 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "ink.qualified.cthugha.audio")
     private let videoQueue = DispatchQueue(label: "ink.qualified.cthugha.video")
+    // Steers the system default input off Bluetooth for the lifetime of capture so
+    // SCK audio capture can't force the headset into low-quality HFP mode.
+    private let btGuard = BluetoothPlaybackGuard()
 
     init(store: WaveformStore) { self.store = store }
 
     func start() async throws {
+        // On macOS 26, enabling ScreenCaptureKit audio capture activates the system
+        // default *input* device. If that input is a Bluetooth headset, the headset
+        // is dragged off high-quality stereo A2DP playback onto the mono hands-free
+        // (HFP) profile — so the user's music suddenly sounds thin and bass-less,
+        // even though we only ever wanted the *output* audio.
+        btGuard.engage(reason: "to keep Bluetooth playback in full A2DP quality during system-audio capture.")
+
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
+            btGuard.release()
             throw NSError(domain: "Cthugha", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No display available for capture."])
         }
@@ -162,16 +312,22 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
         config.minimumFrameInterval = CMTime(value: 1, timescale: 4) // ~4 fps
         config.queueDepth = 3
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-        try await stream.startCapture()
-        self.stream = stream
+        do {
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+            try await stream.startCapture()
+            self.stream = stream
+        } catch {
+            btGuard.release()
+            throw error
+        }
     }
 
     func stop() {
         stream?.stopCapture(completionHandler: { _ in })
         stream = nil
+        btGuard.release()
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -213,9 +369,10 @@ final class MicAudioSource: AudioSource {
         // Never capture from a Bluetooth headset's microphone: opening a BT input
         // forces the headset off the high-quality A2DP playback profile and onto
         // the mono "hands-free" (HFP) profile, which makes music sound thin and
-        // bass-less. If the current default input is Bluetooth, capture from the
-        // built-in microphone instead so playback quality is left untouched.
-        Self.avoidBluetoothInput(on: input)
+        // bass-less. Redirect capture to a non-Bluetooth input (the built-in mic,
+        // or a wired/USB mic). If the only microphone is Bluetooth, refuse rather
+        // than wreck the user's playback — a mic can't hear headphone audio anyway.
+        try Self.selectSafeInputDevice(on: input)
 
         // When no usable input device is available the format comes back as
         // 0 Hz / 0 channels. Installing a tap with such a format makes AVFAudio
@@ -250,76 +407,44 @@ final class MicAudioSource: AudioSource {
         engine.stop()
     }
 
-    // If the default input device is a Bluetooth headset, point the engine's
-    // input at the built-in microphone instead so playback stays on A2DP.
-    private static func avoidBluetoothInput(on input: AVAudioInputNode) {
-        let current = defaultInputDevice()
-        guard current == 0 || isBluetooth(current) else { return }
-        guard let builtIn = builtInInputDevice(), builtIn != current,
-              let unit = input.audioUnit else { return }
-        var dev = builtIn
+    // Point the engine's input at a non-Bluetooth device so that opening the mic
+    // never drags a Bluetooth headset off its high-quality A2DP playback profile.
+    // If the default input is already non-Bluetooth we leave it untouched. If the
+    // only available input is a Bluetooth headset we throw, so callers keep the
+    // user's music pristine instead of capturing at the cost of playback quality.
+    private static func selectSafeInputDevice(on input: AVAudioInputNode) throws {
+        let current = AudioDevices.defaultInput()
+        if current != 0, !AudioDevices.isBluetooth(current) { return }
+
+        guard let safe = AudioDevices.preferredNonBluetoothInput(), let unit = input.audioUnit else {
+            throw NSError(domain: "Cthugha", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                "Microphone capture is unavailable: the only microphone is a Bluetooth "
+                + "headset, and opening it would drop your headphones to low-quality call "
+                + "audio. Connect a wired or USB microphone, or use system-audio capture."])
+        }
+        var dev = safe
         AudioUnitSetProperty(unit,
                              kAudioOutputUnitProperty_CurrentDevice,
                              kAudioUnitScope_Global, 0,
                              &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
-    }
 
-    private static func systemDevices() -> [AudioDeviceID] {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var size: UInt32 = 0
-        let sys = AudioObjectID(kAudioObjectSystemObject)
-        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
-        var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &devices) == noErr else { return [] }
-        return devices
-    }
-
-    private static func defaultInputDevice() -> AudioDeviceID {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var dev = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev)
-        return dev
-    }
-
-    private static func transportType(_ dev: AudioDeviceID) -> UInt32 {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var transport: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &transport)
-        return transport
-    }
-
-    private static func isBluetooth(_ dev: AudioDeviceID) -> Bool {
-        let t = transportType(dev)
-        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
-    }
-
-    private static func hasInputChannels(_ dev: AudioDeviceID) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain)
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(dev, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
-                                                   alignment: MemoryLayout<AudioBufferList>.alignment)
-        defer { raw.deallocate() }
-        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, raw) == noErr else { return false }
-        let abl = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
-        return abl.contains { $0.mNumberChannels > 0 }
-    }
-
-    private static func builtInInputDevice() -> AudioDeviceID? {
-        systemDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && hasInputChannels($0) }
+        // Fail-safe: confirm the input unit actually switched to the non-Bluetooth
+        // device. If the override didn't take (still 0 or still Bluetooth), refuse
+        // rather than fall through and open the Bluetooth mic — protecting playback
+        // is more important than capturing.
+        var actual = AudioDeviceID(0)
+        var actualSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        AudioUnitGetProperty(unit,
+                             kAudioOutputUnitProperty_CurrentDevice,
+                             kAudioUnitScope_Global, 0,
+                             &actual, &actualSize)
+        guard actual == safe || (actual != 0 && !AudioDevices.isBluetooth(actual)) else {
+            throw NSError(domain: "Cthugha", code: 5, userInfo: [NSLocalizedDescriptionKey:
+                "Microphone capture is unavailable: could not switch off the Bluetooth "
+                + "headset mic, and opening it would drop your headphones to low-quality "
+                + "call audio. Connect a wired or USB microphone, or use system-audio capture."])
+        }
+        NSLog("Cthugha: microphone capture routed to '\(AudioDevices.name(safe))' "
+              + "to keep Bluetooth playback in full quality.")
     }
 }

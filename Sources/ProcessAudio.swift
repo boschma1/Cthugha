@@ -163,6 +163,11 @@ final class ProcessTapAudioSource: AudioSource {
     private var aggregateID = AudioObjectID(0)
     private var ioProcID: AudioDeviceIOProcID?
 
+    // Steers the system default input off Bluetooth while the tap runs. Creating
+    // and starting the tap's aggregate device otherwise forces a Bluetooth headset
+    // onto the low-quality HFP profile, wrecking the user's playback.
+    private let btGuard = BluetoothPlaybackGuard()
+
     // Timestamp of the last non-silent buffer, so a watchdog can notice when a
     // tap has gone silent (e.g. its process object went stale) and rebuild it.
     private let audioLock = NSLock()
@@ -219,6 +224,12 @@ final class ProcessTapAudioSource: AudioSource {
         // holds "Screen & System Audio Recording" access, so require it before
         // creating the tap — otherwise the visuals just stay calm with no hint why.
         try Self.ensureScreenRecordingAuthorized(for: name)
+
+        // Creating and starting the tap's aggregate device activates the system
+        // default input; if that's a Bluetooth headset it would be forced onto the
+        // mono HFP profile and ruin the user's music. Steer the default input to a
+        // non-Bluetooth device for the lifetime of the tap.
+        btGuard.engage(reason: "to keep Bluetooth playback in full A2DP quality while capturing \(name).")
 
         markAudio()
 
@@ -306,6 +317,7 @@ final class ProcessTapAudioSource: AudioSource {
         }
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
         if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
+        btGuard.release()
     }
 
     @discardableResult
